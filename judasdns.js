@@ -1,18 +1,13 @@
 #!/usr/bin/env node
-var Q = require( "q" );
-var _ = require( "lodash" );
-var dns = require( "native-dns" );
-var Promise = require( "bluebird" );
-var rangeCheck = require( "range_check" );
-var SETTINGS = require( "./config.json" );
+let _ = require( "lodash" );
+let dns = require( "native-dns" );
+let Promise = require( "bluebird" );
+let rangeCheck = require( "range_check" );
+let SETTINGS = require( "./config.json" );
+let server = dns.createServer();
 
-var server = dns.createServer();
 
-var options = {
-    promiseLib: Promise
-};
-
-var RRCODE_TO_QUERY_NAME_MAP = {
+let RRCODE_TO_QUERY_NAME_MAP = {
     1: "A",
     28: "AAAA",
     18: "AFSDB",
@@ -51,7 +46,7 @@ var RRCODE_TO_QUERY_NAME_MAP = {
     256: "URI"
 }
 
-var RCODE_TO_RESPONSE_CODE_NAME_MAP = {
+let RCODE_TO_RESPONSE_CODE_NAME_MAP = {
     0: "NOERROR",
     1: "FORMERR",
     2: "SERVFAIL",
@@ -80,11 +75,11 @@ function get_random_value( input_array ) {
     return input_array[ Math.floor( Math.random() * input_array.length ) ];
 }
 
-var logger = {
+let logger = {
     "is_verbose": true,
 
     "info": function( input, queryid ) {
-        if( logger.is_verbose == true ) {
+        if( logger.is_verbose ) {
             if( queryid != undefined ) {
                 console.log( "[ INFO ][ ID #" + queryid + " ]", input );
             } else {
@@ -94,7 +89,7 @@ var logger = {
     },
 
     "error": function( input, queryid ) {
-        if( logger.is_verbose == true ) {
+        if( logger.is_verbose ) {
             if( queryid != undefined ) {
                 console.log( "[ ERROR ][ ID #" + queryid + " ]", input );
             } else {
@@ -104,7 +99,7 @@ var logger = {
     },
 
     "success": function( input, queryid ) {
-        if( logger.is_verbose == true ) {
+        if( logger.is_verbose ) {
             if( queryid != undefined ) {
                 console.log( "[ SUCCESS ][ ID #" + queryid + " ]", input );
             } else {
@@ -114,7 +109,7 @@ var logger = {
     },
 
     "raw": function( input ) {
-        if( logger.is_verbose == true ) {
+        if( logger.is_verbose ) {
             console.log( input );
         }
     },
@@ -143,7 +138,7 @@ function pprint( input ) {
 
 function dns_request( request_data ) {
     return new Promise( function( resolve, reject ) {
-        var req = dns.Request( request_data );
+        let req = dns.Request( request_data );
 
         req.on( "timeout", function () {
             reject({
@@ -166,36 +161,44 @@ function rule_matches( request, response, modification_rule ) {
         if( "query_type_matches" in modification_rule ) {
            return ( contains( rrcode_to_queryname( response.question[0].type ), modification_rule.query_type_matches ) ||
                    contains( "*", modification_rule.query_type_matches ) );
-        } else {
-            return true;
         }
-        return false;
+        return true;
     }
 
     function ip_range_matches() {
         if( "ip_range_matches" in modification_rule ) {
-            for( var i = 0; i < modification_rule.ip_range_matches.length; i++ ) {
-                if( rangeCheck.inRange( request.address.address, modification_rule.ip_range_matches[i] ) ) {
+            for( const range of modification_rule.ip_range_matches ) {
+                if( rangeCheck.inRange( request.address.address, range ) ) {
                     return true;
                 }
             }
-        } else {
-            return true;
+            return false
         }
-        return false;
+        return true;
     }
 
     function response_code_matches() {
         if( "response_code_matches" in modification_rule ) {
            return ( rcode_to_responsename( response.header.rcode === modification_rule.response_code_matches ) ||
                    contains( "*", modification_rule.response_code_matches ) );
-        } else {
-            return true;
         }
-        return false;
+        return true;
     }
 
-    return Boolean( query_type_matches() && ip_range_matches() );
+    function query_name_matches() {
+        if( "query_name_matches" in modification_rule ) {
+            for( const regex of modification_rule.query_name_matches ) {
+                let re = new RegExp(regex, "i")
+                if(re.test(request.question.name)){
+                    return true
+                }
+            }
+            return false
+        }
+        return true
+    }
+
+    return Boolean( query_type_matches() && ip_range_matches() && response_code_matches() && query_name_matches() );
 }
 
 function apply_response_modifications( request, response ) {
@@ -240,7 +243,7 @@ function rrcode_to_queryname( rrcode ) {
 }
 
 function rcode_to_responsename( rcode ) {
-    if( rrcode in RCODE_TO_RESPONSE_CODE_NAME_MAP ) {
+    if( rcode in RCODE_TO_RESPONSE_CODE_NAME_MAP ) {
         return RCODE_TO_RESPONSE_CODE_NAME_MAP[ rcode ];
     }
     return "UKNOWN";
@@ -248,7 +251,7 @@ function rcode_to_responsename( rcode ) {
 
 function queryname_to_rrcode( queryname ) {
     queryname = queryname.toUpperCase();
-    for ( var key in RRCODE_TO_QUERY_NAME_MAP ) {
+    for ( let key in RRCODE_TO_QUERY_NAME_MAP ) {
         if( RRCODE_TO_QUERY_NAME_MAP.hasOwnProperty( key ) && RRCODE_TO_QUERY_NAME_MAP[ key ] == queryname ) {
             return key;
         }
@@ -257,15 +260,20 @@ function queryname_to_rrcode( queryname ) {
 }
 
 server.on( "request", function( request, response ) {
-    var request_id = request.header.id; // So we can clone the header from the DNS request and reply with it without breaking the ID match.
+    const request_id = request.header.id; // So we can clone the header from the DNS request and reply with it without breaking the ID match.
     request.question = request.question[0];
     logger.info( rrcode_to_queryname( request.question.type ) + " query for " + request.question.name +  " received from " + request.address.address, request_id );
-    var legit_ns_ip = get_random_value( SETTINGS.target_nameservers );
-    var forwarded_request = dns.Request({
+    let legit_ns_ip = get_random_value( SETTINGS.target_nameservers );
+    let legit_ns_port = 53
+    if(contains(legit_ns_ip, ":")){
+        legit_ns_port = Number(legit_ns_ip.split(':')[1])
+        legit_ns_ip = legit_ns_ip.split(':')[0]
+    }
+    const forwarded_request = dns.Request({
         "question": request.question,
         "server": {
             "address": legit_ns_ip,
-            "port": 53,
+            "port": legit_ns_port,
             "type": "udp"
         },
         "timeout": SETTINGS.dns_query_timeout,
